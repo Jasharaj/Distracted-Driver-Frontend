@@ -1,6 +1,6 @@
-import React, { useState, useEffect, useCallback } from 'react'
-import * as tf from '@tensorflow/tfjs'
+import { useState, useEffect, useCallback } from 'react'
 import { useDropzone } from 'react-dropzone'
+import { apiService } from './services/api'
 import './App.css'
 
 // Driver behavior classes
@@ -19,262 +19,289 @@ const CLASSES = [
 
 interface PredictionResult {
   class: string
+  class_name: string
   confidence: number
-  classIndex: number
 }
 
+// Disclaimer component
+const ModelDisclaimer = () => (
+  <div className="disclaimer-banner" style={{
+    backgroundColor: '#fff3cd',
+    border: '1px solid #ffeaa7',
+    borderRadius: '8px',
+    padding: '16px',
+    margin: '16px 0',
+    fontSize: '14px',
+    color: '#856404'
+  }}>
+    <strong>⚠️ Demo Model Limitations</strong>
+    <p style={{ margin: '8px 0 0 0' }}>
+      This is a demonstration model trained on limited sample data. 
+      For production use, the model would need training on the full 
+      State Farm dataset (22,424 images) for accurate predictions.
+      Current predictions are for demonstration purposes only.
+    </p>
+  </div>
+);
+
 function App() {
-  const [model, setModel] = useState<tf.LayersModel | null>(null)
+  const [apiConnected, setApiConnected] = useState(false)
   const [loading, setLoading] = useState(true)
   const [predicting, setPredicting] = useState(false)
   const [uploadedImage, setUploadedImage] = useState<string | null>(null)
   const [predictions, setPredictions] = useState<PredictionResult[]>([])
+  const [mainPrediction, setMainPrediction] = useState<PredictionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
 
-  // Load TensorFlow.js model
+  // Check API connection on mount
   useEffect(() => {
-    const loadModel = async () => {
+    const checkApi = async () => {
       try {
         setLoading(true)
         setError(null)
         
-        // For now, create a simple demo model
-        // In production, you would load your trained model
-        console.log('Creating demo model...')
+        const isConnected = await apiService.checkConnection()
+        setApiConnected(isConnected)
         
-        // Create a simple CNN model for demonstration
-        const demoModel = tf.sequential({
-          layers: [
-            tf.layers.conv2d({
-              inputShape: [64, 64, 3],
-              filters: 32,
-              kernelSize: 3,
-              activation: 'relu'
-            }),
-            tf.layers.maxPooling2d({ poolSize: 2 }),
-            tf.layers.conv2d({ filters: 64, kernelSize: 3, activation: 'relu' }),
-            tf.layers.maxPooling2d({ poolSize: 2 }),
-            tf.layers.flatten(),
-            tf.layers.dense({ units: 128, activation: 'relu' }),
-            tf.layers.dense({ units: 10, activation: 'softmax' })
-          ]
-        })
+        if (isConnected) {
+          const healthResponse = await apiService.healthCheck()
+          if (healthResponse.error) {
+            setError(`API Error: ${healthResponse.error}`)
+            setApiConnected(false)
+          }
+        } else {
+          setError('Cannot connect to API. Please ensure the backend is running.')
+        }
         
-        setModel(demoModel)
-        console.log('Demo model loaded successfully')
       } catch (err) {
-        console.error('Error loading model:', err)
-        setError('Failed to load the ML model. Using demo predictions.')
+        setError('Failed to connect to API')
+        setApiConnected(false)
       } finally {
         setLoading(false)
       }
     }
 
-    loadModel()
+    checkApi()
   }, [])
 
-  // Handle image upload and prediction
-  const onDrop = useCallback(async (acceptedFiles: File[]) => {
-    const file = acceptedFiles[0]
-    if (!file) return
-
-    // Display uploaded image
-    const imageUrl = URL.createObjectURL(file)
-    setUploadedImage(imageUrl)
-    
-    // Make prediction
-    await makePrediction(file)
-  }, [model])
-
-  const makePrediction = async (file: File) => {
-    if (!model && !error) {
-      setError('Model not loaded yet')
+  // Predict image using API
+  const predictImage = useCallback(async (file: File) => {
+    if (!apiConnected) {
+      setError('API not connected')
       return
     }
 
-    setPredicting(true)
-    setError(null)
-
     try {
-      // Create image element
-      const img = new Image()
-      img.src = URL.createObjectURL(file)
+      setPredicting(true)
+      setError(null)
       
-      await new Promise((resolve) => {
-        img.onload = resolve
-      })
-
-      // Preprocess image
-      const tensor = tf.browser.fromPixels(img)
-        .resizeNearestNeighbor([64, 64])
-        .expandDims(0)
-        .div(255.0)
-
-      let predictionTensor: tf.Tensor
-
-      if (model) {
-        // Use actual model prediction
-        predictionTensor = model.predict(tensor) as tf.Tensor
-      } else {
-        // Generate demo predictions with realistic confidence scores
-        const demoScores = generateDemoPredictions()
-        predictionTensor = tf.tensor2d([demoScores])
+      const response = await apiService.predictImage(file)
+      
+      if (response.error) {
+        setError(response.error)
+        return
       }
 
-      const predictions = await predictionTensor.data()
+      if (response.data) {
+        setMainPrediction(response.data.prediction)
+        setPredictions(response.data.top_predictions)
+      }
       
-      // Process predictions
-      const results: PredictionResult[] = Array.from(predictions)
-        .map((confidence, index) => ({
-          class: CLASSES[index],
-          confidence: confidence * 100,
-          classIndex: index
-        }))
-        .sort((a, b) => b.confidence - a.confidence)
-
-      setPredictions(results)
-
-      // Cleanup tensors
-      tensor.dispose()
-      predictionTensor.dispose()
-
     } catch (err) {
-      console.error('Prediction error:', err)
-      setError('Failed to make prediction. Please try again.')
+      setError('Prediction failed')
     } finally {
       setPredicting(false)
     }
-  }
+  }, [apiConnected])
 
-  // Generate realistic demo predictions
-  const generateDemoPredictions = (): number[] => {
-    const scores = new Array(10).fill(0).map(() => Math.random() * 0.3)
-    
-    // Make one class have higher confidence
-    const topClass = Math.floor(Math.random() * 10)
-    scores[topClass] = 0.4 + Math.random() * 0.4
-    
-    // Normalize to sum to 1 (softmax-like)
-    const sum = scores.reduce((a, b) => a + b, 0)
-    return scores.map(score => score / sum)
-  }
+  // Handle file drop
+  const onDrop = useCallback((acceptedFiles: File[]) => {
+    const file = acceptedFiles[0]
+    if (file) {
+      // Create preview
+      const reader = new FileReader()
+      reader.onload = () => {
+        setUploadedImage(reader.result as string)
+      }
+      reader.readAsDataURL(file)
+      
+      // Make prediction
+      predictImage(file)
+    }
+  }, [predictImage])
 
   const { getRootProps, getInputProps, isDragActive } = useDropzone({
     onDrop,
     accept: {
-      'image/*': ['.jpeg', '.jpg', '.png', '.gif']
+      'image/*': ['.jpeg', '.jpg', '.png', '.bmp']
     },
-    multiple: false
+    multiple: false,
+    maxSize: 10 * 1024 * 1024 // 10MB
   })
 
-  const getSafetyLevel = (topPrediction: PredictionResult) => {
-    if (topPrediction.classIndex === 0) {
-      return { level: 'SAFE', color: '#22c55e', message: 'Driver appears to be driving safely' }
-    } else if (topPrediction.confidence > 70) {
-      return { level: 'HIGH RISK', color: '#ef4444', message: 'Potentially dangerous distracted driving detected' }
+  const getSafetyInfo = (prediction: PredictionResult) => {
+    const confidence = prediction.confidence
+    const isDistracted = !prediction.class_name.toLowerCase().includes('safe')
+    
+    if (isDistracted && confidence > 0.7) {
+      return {
+        level: 'HIGH RISK',
+        message: 'Driver appears to be distracted. Immediate attention required.',
+        color: '#ef4444'
+      }
+    } else if (isDistracted && confidence > 0.4) {
+      return {
+        level: 'MODERATE RISK',
+        message: 'Possible distracted driving detected.',
+        color: '#f59e0b'
+      }
     } else {
-      return { level: 'MODERATE RISK', color: '#f59e0b', message: 'Some distraction detected' }
+      return {
+        level: 'LOW RISK',
+        message: 'Driver appears to be focused on driving.',
+        color: '#10b981'
+      }
     }
   }
 
+  const resetPrediction = () => {
+    setUploadedImage(null)
+    setPredictions([])
+    setMainPrediction(null)
+    setError(null)
+  }
+
+  if (loading) {
+    return (
+      <div className="app">
+        <div className="loading-container">
+          <div className="loading-spinner"></div>
+          <p>Connecting to API...</p>
+        </div>
+      </div>
+    )
+  }
+
   return (
-    <div className="App">
-      <header className="header">
+    <div className="app">
+      <header className="app-header">
         <h1>🚗 Distracted Driver Detection</h1>
-        <p>AI-powered driver behavior analysis using computer vision</p>
+        <p>Upload an image to detect driver behavior and safety risks</p>
+        <div className={`api-status ${apiConnected ? 'connected' : 'disconnected'}`}>
+          <span className="status-indicator"></span>
+          API {apiConnected ? 'Connected' : 'Disconnected'}
+        </div>
       </header>
 
-      <main className="main">
-        {loading && (
-          <div className="loading">
-            <div className="spinner"></div>
-            <p>Loading AI model...</p>
+      <main className="app-main">
+        <ModelDisclaimer />
+        
+        {error && (
+          <div className="error-banner">
+            <strong>Error:</strong> {error}
+            <button onClick={() => setError(null)} className="close-btn">×</button>
           </div>
         )}
 
-        {!loading && (
-          <>
-            <div className="upload-section">
-              <div {...getRootProps()} className={`dropzone ${isDragActive ? 'active' : ''}`}>
-                <input {...getInputProps()} />
+        {!uploadedImage ? (
+          <div className="upload-section">
+            <div {...getRootProps()} className={`dropzone ${isDragActive ? 'active' : ''} ${!apiConnected ? 'disabled' : ''}`}>
+              <input {...getInputProps()} disabled={!apiConnected} />
+              <div className="dropzone-content">
+                <div className="upload-icon">📷</div>
                 {isDragActive ? (
                   <p>Drop the image here...</p>
                 ) : (
-                  <div className="dropzone-content">
-                    <div className="upload-icon">📸</div>
-                    <p>Drag & drop a driver image here, or click to select</p>
-                    <small>Supports JPG, PNG, GIF formats</small>
-                  </div>
+                  <>
+                    <p><strong>Click to upload</strong> or drag and drop</p>
+                    <p className="upload-hint">Support: JPG, PNG, BMP (max 10MB)</p>
+                  </>
                 )}
               </div>
             </div>
-
-            {error && (
-              <div className="error">
-                <p>⚠️ {error}</p>
-              </div>
-            )}
-
-            {uploadedImage && (
-              <div className="results-section">
-                <div className="image-container">
-                  <img src={uploadedImage} alt="Uploaded" className="uploaded-image" />
-                </div>
-
-                {predicting && (
-                  <div className="predicting">
-                    <div className="spinner"></div>
-                    <p>Analyzing driver behavior...</p>
+            
+            <div className="class-info">
+              <h3>Detection Classes</h3>
+              <div className="classes-grid">
+                {CLASSES.map((cls, index) => (
+                  <div key={index} className="class-item">
+                    {cls}
                   </div>
-                )}
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="results-section">
+            <div className="image-container">
+              <img src={uploadedImage} alt="Uploaded" className="uploaded-image" />
+              <button onClick={resetPrediction} className="reset-btn">
+                Upload New Image
+              </button>
+            </div>
 
-                {predictions.length > 0 && !predicting && (
-                  <div className="predictions">
-                    <div className="safety-alert">
-                      {(() => {
-                        const safety = getSafetyLevel(predictions[0])
-                        return (
-                          <div className="safety-badge" style={{ backgroundColor: safety.color }}>
-                            <strong>{safety.level}</strong>
-                            <p>{safety.message}</p>
-                          </div>
-                        )
-                      })()}
+            {predicting ? (
+              <div className="loading-container">
+                <div className="loading-spinner"></div>
+                <p>Analyzing driver behavior...</p>
+              </div>
+            ) : (
+              predictions.length > 0 && mainPrediction && (
+                <div className="prediction-results">
+                  <div className="main-prediction">
+                    <h2>Primary Detection</h2>
+                    <div className="prediction-card">
+                      <div className="prediction-header">
+                        <span className="class-code">{mainPrediction.class}</span>
+                        <span className="confidence-score">
+                          {(mainPrediction.confidence * 100).toFixed(1)}%
+                        </span>
+                      </div>
+                      <h3 className="class-name">{mainPrediction.class_name}</h3>
                     </div>
 
-                    <h3>Detection Results</h3>
-                    <div className="predictions-list">
-                      {predictions.slice(0, 5).map((pred, index) => (
-                        <div key={index} className={`prediction-item ${index === 0 ? 'top-prediction' : ''}`}>
-                          <div className="prediction-label">
-                            <span className="class-name">{pred.class}</span>
-                            <span className="confidence">{pred.confidence.toFixed(1)}%</span>
-                          </div>
-                          <div className="confidence-bar">
-                            <div 
-                              className="confidence-fill"
-                              style={{ 
-                                width: `${pred.confidence}%`,
-                                backgroundColor: index === 0 ? '#3b82f6' : '#94a3b8'
-                              }}
-                            ></div>
-                          </div>
+                    {(() => {
+                      const safety = getSafetyInfo(mainPrediction)
+                      return (
+                        <div className="safety-badge" style={{ backgroundColor: safety.color }}>
+                          <strong>{safety.level}</strong>
+                          <p>{safety.message}</p>
                         </div>
-                      ))}
-                    </div>
+                      )
+                    })()}
                   </div>
-                )}
-              </div>
+
+                  <h3>All Detection Results</h3>
+                  <div className="predictions-list">
+                    {predictions.map((pred, index) => (
+                      <div key={index} className={`prediction-item ${index === 0 ? 'top-prediction' : ''}`}>
+                        <div className="prediction-label">
+                          <span className="class-code">{pred.class}</span>
+                          <span className="class-name">{pred.class_name}</span>
+                          <span className="confidence">{(pred.confidence * 100).toFixed(1)}%</span>
+                        </div>
+                        <div className="confidence-bar">
+                          <div 
+                            className="confidence-fill"
+                            style={{ 
+                              width: `${pred.confidence * 100}%`,
+                              backgroundColor: index === 0 ? '#3b82f6' : '#94a3b8'
+                            }}
+                          ></div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )
             )}
-          </>
+          </div>
         )}
       </main>
 
-      <footer className="footer">
-        <p>
-          Powered by TensorFlow.js • 
-          <a href="https://github.com" target="_blank" rel="noopener noreferrer"> View Source</a>
-        </p>
+      <footer className="app-footer">
+        <p>Powered by ResNet-50 Deep Learning Model</p>
+        <p>⚠️ For demonstration purposes only</p>
       </footer>
     </div>
   )
